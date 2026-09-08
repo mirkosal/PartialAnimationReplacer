@@ -1,0 +1,105 @@
+name: Build PartialAnimationReplacer for Skyrim 1.7.104
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-skyrim-1.7.104.yml'
+
+jobs:
+  build:
+    runs-on: windows-2022
+    env:
+      VCPKG_ROOT: C:\vcpkg-par
+
+    steps:
+      - name: Checkout Skyrim 1.7.104 port branch
+        uses: actions/checkout@v4
+        with:
+          ref: skyrim-1.7.104-port
+          submodules: recursive
+
+      - name: Setup vcpkg
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments "-arch=x64"
+
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL `
+            -DCMAKE_CXX_FLAGS="/EHsc /MP /W4" `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static-md `
+            -DVCPKG_OVERLAY_PORTS="$PWD\cmake\ports" `
+            -DSKSE_SUPPORT_XBYAK=ON `
+            -DBUILD_SKYRIM=ON `
+            -DENABLE_SKYRIM_SE=ON `
+            -DENABLE_SKYRIM_AE=ON `
+            -DENABLE_SKYRIM_VR=OFF
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Patch clib-util editorID.hpp
+        shell: pwsh
+        run: |
+          $targets = @(Get-ChildItem -Path "$PWD\build\vcpkg_installed" -Recurse -Filter "editorID.hpp" -ErrorAction SilentlyContinue)
+          if ($targets.Count -gt 0) {
+            $url = "https://raw.githubusercontent.com/powerof3/CLibUtil/master/include/CLIBUtil/editorID.hpp"
+            foreach ($t in $targets) {
+              Invoke-WebRequest -Uri $url -OutFile $t.FullName -UseBasicParsing
+              Write-Host "Patched $($t.FullName)"
+            }
+          }
+
+      - name: Build Release
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments "-arch=x64"
+          cmake --build build --parallel 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package Vortex-ready ZIP
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Path build -Filter PartialAnimationReplacer.dll -Recurse | Select-Object -First 1
+          if (-not $dll) {
+            Write-Error 'PartialAnimationReplacer.dll was not produced by the build.'
+            Get-ChildItem -Path build -Filter *.dll -Recurse | Select-Object FullName, Length
+            exit 1
+          }
+
+          New-Item -ItemType Directory -Force -Path package\SKSE\Plugins | Out-Null
+          Copy-Item $dll.FullName package\SKSE\Plugins\PartialAnimationReplacer.dll
+
+          @"
+          Partial Animation Replacer test build
+          Target Skyrim runtime: 1.7.104.0
+          Target SKSE: 2.3.1
+          CommonLibSSE-NG: v7.4.0
+          Address Library: runtime 1.7.104.0 / format 5 compatible CommonLib
+          Source branch: skyrim-1.7.104-port
+          Workflow commit: $env:GITHUB_SHA
+          "@ | Set-Content -Path package\BUILD_INFO.txt -Encoding utf8
+
+          Compress-Archive -Path package\* -DestinationPath PartialAnimationReplacer-Skyrim-1.7.104-Test.zip -Force
+
+      - name: Upload Vortex-ready ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: PartialAnimationReplacer-Skyrim-1.7.104-Test
+          path: PartialAnimationReplacer-Skyrim-1.7.104-Test.zip
+          if-no-files-found: error
+          retention-days: 14
