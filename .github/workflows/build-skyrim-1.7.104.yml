@@ -9,6 +9,7 @@ on:
       - '.github/workflows/build-skyrim-1.7.104.yml'
 
 # Builds the dedicated port branch while keeping main source unchanged.
+# Rebuild marker: CommonLibSSE-NG 7.4 PluginVersionData API fix.
 jobs:
   build:
     runs-on: windows-2022
